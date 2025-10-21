@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>电池动画 (消除闪烁缝隙)</title>
+    <style>
+        body { background-color: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: "SimHei", "Microsoft YaHei", sans-serif; color: #e0e0e0; }
+        #animationContainer { position: relative; }
+        canvas { background-color: #252535; }
+    </style>
+</head>
+<body>
+    <div id="animationContainer">
+        <canvas id="batteryAnimationCanvas" width="600" height="500"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('batteryAnimationCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- Configuration ---
+        const UNCERTAINTY_MIN = 0;
+        const UNCERTAINTY_MAX = 10;
+        const MAX_OVERALL_BLUR_PX = 5;
+
+        const meterX = 80; const meterY = 50; const meterWidth = 300; const meterHeight = 30; const meterBulbRadius = meterHeight / 1.5;
+        const batteryX = 150; const batteryY = 150; const batteryWidth = 150; const batteryHeight = 300; const batteryCapHeight = 20; const batteryCapWidth = batteryWidth * 0.6; const batteryCornerRadius = 15; const batteryLiquidPadding = 10;
+        
+        const fillableInnerHeight = batteryHeight - batteryCapHeight - 2 * batteryLiquidPadding;
+        
+        const UNIFIED_SOLID_SURFACE_FILL_PERCENT = 0.55; 
+        const MAX_BIDIRECTIONAL_FUZZ_THICKNESS_PERCENT = 0.12; 
+        const OVERLAP_FIX = 0.5; // Pixels to overlap to fix flickering seam
+
+        // Colors
+        const meterOutlineColor = '#FFF'; const meterFillColor = '#FF6347'; const batteryOutlineColor = '#E0E0E0';
+        
+        const liquidColorSolidGreen = 'rgba(76, 175, 80, 0.95)';   
+        const liquidColorBlueDeep = 'rgba(15, 75, 190, 0.90)';    
+        const liquidColorTransparentBlue = 'rgba(15, 75, 190, 0.0)';
+        
+        const labelTextColor = '#E0E0E0'; const externalIndicatorColor = '#FFA500';
+
+        let currentTime = 0;
+
+        function mapRange(value, inMin, inMax, outMin, outMax) { const val = (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin; return Math.max(outMin, Math.min(outMax, val)); }
+        function drawRoundedRect(x, y, width, height, radius) { ctx.beginPath(); ctx.moveTo(x + radius, y); ctx.lineTo(x + width - radius, y); ctx.quadraticCurveTo(x + width, y, x + width, y + radius); ctx.lineTo(x + width, y + height - radius); ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height); ctx.lineTo(x + radius, y + height); ctx.quadraticCurveTo(x, y + height, x, y + height - radius); ctx.lineTo(x, y + radius); ctx.quadraticCurveTo(x, y, x + radius, y); ctx.closePath(); }
+        function drawUncertaintyMeter(uncertaintyValue) { ctx.save(); ctx.strokeStyle = meterOutlineColor; ctx.fillStyle = meterOutlineColor; ctx.lineWidth = 2; drawRoundedRect(meterX + meterBulbRadius, meterY, meterWidth - meterBulbRadius, meterHeight, meterHeight / 2); ctx.stroke(); ctx.beginPath(); ctx.arc(meterX + meterBulbRadius, meterY + meterHeight / 2, meterBulbRadius, 0, Math.PI * 2); ctx.fill(); const fillWidth = mapRange(uncertaintyValue, UNCERTAINTY_MIN, UNCERTAINTY_MAX, 0, meterWidth - meterBulbRadius); ctx.fillStyle = meterFillColor; ctx.beginPath(); ctx.arc(meterX + meterBulbRadius, meterY + meterHeight / 2, meterBulbRadius - 3, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); const barFillStartX = meterX + meterBulbRadius; const barFillY = meterY + 3; const barFillHeight = meterHeight - 6; if (fillWidth > 0) { ctx.moveTo(barFillStartX, barFillY); ctx.lineTo(barFillStartX + fillWidth - barFillHeight / 2, barFillY); ctx.arc(barFillStartX + fillWidth - barFillHeight / 2, barFillY + barFillHeight / 2, barFillHeight / 2, -Math.PI/2, Math.PI/2); ctx.lineTo(barFillStartX, barFillY + barFillHeight); ctx.arc(barFillStartX, barFillY + barFillHeight / 2, barFillHeight / 2, Math.PI/2, -Math.PI/2, true); } else { ctx.moveTo(barFillStartX, barFillY); ctx.arc(barFillStartX, barFillY + barFillHeight / 2, barFillHeight / 2, -Math.PI/2, Math.PI/2, false); ctx.arc(barFillStartX, barFillY + barFillHeight / 2, barFillHeight / 2, Math.PI/2, -Math.PI/2, false); } ctx.closePath(); ctx.fill(); ctx.fillStyle = labelTextColor; ctx.font = '16px "SimHei", "Microsoft YaHei", sans-serif'; ctx.textAlign = 'center'; ctx.fillText("不确定度", meterX + (meterBulbRadius + meterWidth - meterBulbRadius) / 2, meterY - 10); const ticksData = [ { value: UNCERTAINTY_MIN, label: "低" }, { value: (UNCERTAINTY_MIN + UNCERTAINTY_MAX) / 2, label: "中" }, { value: UNCERTAINTY_MAX, label: "高" }]; ticksData.forEach(tick => { const tickX = meterX + meterBulbRadius + mapRange(tick.value, UNCERTAINTY_MIN, UNCERTAINTY_MAX, 0, meterWidth - meterBulbRadius); ctx.beginPath(); ctx.moveTo(tickX, meterY + meterHeight); ctx.lineTo(tickX, meterY + meterHeight + 8); ctx.stroke(); ctx.fillText(tick.label, tickX, meterY + meterHeight + 25); }); ctx.restore(); }
+
+        let externalLineBottomY_indicator = 0;
+        let externalLineTopY_indicator = 0;
+        
+        function drawLiquidInsideBattery(centerOfBlueY, uncertaintyValue) {
+            const liquidBottomDeviceY = batteryY + batteryHeight - batteryLiquidPadding; 
+            const liquidLeftX = batteryX + batteryLiquidPadding;
+            const liquidWidth = batteryWidth - 2 * batteryLiquidPadding;
+
+            const maxFuzzPx = fillableInnerHeight * MAX_BIDIRECTIONAL_FUZZ_THICKNESS_PERCENT;
+            const currentFuzzThickness = mapRange(uncertaintyValue, UNCERTAINTY_MIN, UNCERTAINTY_MAX, 0, maxFuzzPx);
+
+            const topBlueBoundaryY = centerOfBlueY - currentFuzzThickness;
+            const bottomBlueBoundaryY = Math.min(liquidBottomDeviceY, centerOfBlueY + currentFuzzThickness); 
+
+            externalLineTopY_indicator = topBlueBoundaryY;
+            externalLineBottomY_indicator = bottomBlueBoundaryY;
+            
+            // --- Draw Base Solid Green Part FIRST ---
+            // From battery bottom up to bottomBlueBoundaryY.
+            const solidGreenHeight = liquidBottomDeviceY - bottomBlueBoundaryY;
+            if (solidGreenHeight > -OVERLAP_FIX) { // Allow drawing even if slightly negative due to overlap
+                ctx.fillStyle = liquidColorSolidGreen;
+                // We draw this first. The blue gradient below will slightly overlap its top edge.
+                ctx.fillRect(liquidLeftX, bottomBlueBoundaryY, liquidWidth, Math.max(0, solidGreenHeight));
+            }
+
+            // --- Draw Downward Blue "Contamination" Gradient SECOND ---
+            // From centerOfBlueY (deep blue) down to bottomBlueBoundaryY (transitions to solid green)
+            if (currentFuzzThickness > 0.01 && centerOfBlueY < bottomBlueBoundaryY + OVERLAP_FIX) { // Check against slightly extended boundary
+                const gradDownBlueToGreen = ctx.createLinearGradient(0, centerOfBlueY, 0, bottomBlueBoundaryY);
+                gradDownBlueToGreen.addColorStop(0, liquidColorBlueDeep);
+                gradDownBlueToGreen.addColorStop(1, liquidColorSolidGreen); 
+                ctx.fillStyle = gradDownBlueToGreen;
+                // Extend the fill slightly downwards to ensure overlap with the solid green
+                ctx.fillRect(liquidLeftX, centerOfBlueY, liquidWidth, (bottomBlueBoundaryY - centerOfBlueY) + OVERLAP_FIX);
+            }
+            
+            // --- Draw Upward Blue Fuzz Gradient LAST ---
+            // From topBlueBoundaryY (transparent blue) up to centerOfBlueY (deep blue)
+            if (currentFuzzThickness > 0.01 && topBlueBoundaryY < centerOfBlueY) {
+                const gradUpBlueToTransparent = ctx.createLinearGradient(0, topBlueBoundaryY, 0, centerOfBlueY);
+                gradUpBlueToTransparent.addColorStop(0, liquidColorTransparentBlue); 
+                gradUpBlueToTransparent.addColorStop(1, liquidColorBlueDeep);     
+                ctx.fillStyle = gradUpBlueToTransparent;
+                // Ensure the upward gradient also perfectly meets or slightly overlaps centerOfBlueY point of the downward gradient
+                ctx.fillRect(liquidLeftX, topBlueBoundaryY, liquidWidth, (centerOfBlueY - topBlueBoundaryY) + OVERLAP_FIX);
+            }
+
+
+        }
+
+        function drawExternalUncertaintyLines(topUncertainY, bottomUncertainY) { /* (Unchanged) */ if (Math.abs(topUncertainY - bottomUncertainY) < 1 && topUncertainY !==0 && bottomUncertainY !==0) return; ctx.save(); const lineXOffset = 25; const lineLength = 20; const labelOffsetX = 5; const bracketArmLength = 8; ctx.strokeStyle = externalIndicatorColor; ctx.fillStyle = externalIndicatorColor; ctx.lineWidth = 2; ctx.font = '12px "SimHei", "Microsoft YaHei", sans-serif'; ctx.textAlign = 'left'; const rightLineStartX = batteryX + batteryWidth + lineXOffset; ctx.beginPath(); ctx.moveTo(rightLineStartX, bottomUncertainY); ctx.lineTo(rightLineStartX + lineLength, bottomUncertainY); ctx.stroke(); ctx.beginPath(); ctx.moveTo(rightLineStartX, topUncertainY); ctx.lineTo(rightLineStartX + lineLength, topUncertainY); ctx.stroke(); const bracketX = rightLineStartX + lineLength / 2; ctx.beginPath(); ctx.moveTo(bracketX, bottomUncertainY); ctx.lineTo(bracketX, topUncertainY); ctx.moveTo(bracketX - bracketArmLength / 2, bottomUncertainY); ctx.lineTo(bracketX + bracketArmLength / 2, bottomUncertainY); ctx.moveTo(bracketX - bracketArmLength / 2, topUncertainY); ctx.lineTo(bracketX + bracketArmLength / 2, topUncertainY); ctx.stroke(); const labelY = topUncertainY + (bottomUncertainY - topUncertainY) / 2; if (Math.abs(topUncertainY - bottomUncertainY) > 5) { ctx.fillText('不确定性区间', rightLineStartX + lineLength + labelOffsetX, labelY + 4); } ctx.restore(); }
+        function drawSignature() { /* (Unchanged) */ ctx.save(); ctx.font = '14px "SimHei", "Microsoft YaHei", sans-serif'; ctx.fillStyle = 'rgba(200, 200, 200, 0.7)'; ctx.textAlign = 'right'; ctx.fillText('@DIB-LAB 陈浩楠', canvas.width - 30, canvas.height - 30); ctx.restore(); }
+
+        let lastTime = 0;
+        function animate(timestamp) {
+            const deltaTime = (timestamp - lastTime) / 1000 || 0; lastTime = timestamp; currentTime += deltaTime;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const animatedUncertainty = mapRange(Math.sin(currentTime * 0.65) * 0.5 + 0.5, 0, 1, UNCERTAINTY_MIN, UNCERTAINTY_MAX);
+            const overallBlurValue = mapRange(animatedUncertainty, UNCERTAINTY_MIN, UNCERTAINTY_MAX, 0, MAX_OVERALL_BLUR_PX);
+
+            drawUncertaintyMeter(animatedUncertainty);
+            
+            ctx.save();
+            if (overallBlurValue > 0.01) { ctx.filter = `blur(${overallBlurValue.toFixed(1)}px)`; }
+            ctx.strokeStyle = batteryOutlineColor; ctx.lineWidth = 3;
+            drawRoundedRect(batteryX, batteryY + batteryCapHeight, batteryWidth, batteryHeight - batteryCapHeight, batteryCornerRadius); ctx.stroke();
+            const capX_ = batteryX + (batteryWidth - batteryCapWidth) / 2;
+            drawRoundedRect(capX_, batteryY, batteryCapWidth, batteryCapHeight, 5); ctx.stroke();
+            ctx.restore(); 
+
+            const liquidBottomDeviceY_ = batteryY + batteryHeight - batteryLiquidPadding;
+            const centerOfBlueY_ = liquidBottomDeviceY_ - (fillableInnerHeight * UNIFIED_SOLID_SURFACE_FILL_PERCENT);
+            drawLiquidInsideBattery(centerOfBlueY_, animatedUncertainty);
+
+            if (animatedUncertainty > UNCERTAINTY_MIN + 0.2 && (externalLineTopY_indicator !== 0 || externalLineBottomY_indicator !== 0) ) {
+                 drawExternalUncertaintyLines(externalLineTopY_indicator, externalLineBottomY_indicator);
+            }
+            drawSignature();
+            requestAnimationFrame(animate);
+        }
+        
+        animate(0);
+    </script>
+</body>
+</html>
